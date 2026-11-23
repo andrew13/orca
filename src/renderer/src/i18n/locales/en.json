@@ -1807,6 +1807,7 @@
       "editMemory": "Edit",
       "addMemoryPlaceholder": "Remember something new…",
       "memoryEmpty": "No facts saved yet.",
+      "memoryAlreadySaved": "That fact is already in memory.",
       "saving": "Saving…",
       "unsaved": "Unsaved",
       "saved": "Saved",
