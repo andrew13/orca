@@ -46,6 +46,7 @@ export type StructuredAgentSessionOptimisticMessage = {
   /** Null when this client did not make the send and nothing dates it. */
   queuedAt: number | null
   phase?: 'sending' | 'recorded' | 'unconfirmed'
+  retainedSendId?: string
   recordedCursor?: AgentJournalCursor
   /** In-memory placement captured at Send, independent of any acknowledgement. */
   afterSequence?: number
@@ -158,7 +159,7 @@ export function projectStructuredAgentSessionMessageRows(
         continue
       }
       if (send.dispatchState === 'rejected' && send.retryOfClientMessageId) {
-        if (!agentJournalSubmissionReturnedToCard(send)) {
+        if (!agentJournalSubmissionReturnedToCard(send) && !resent.has(item.itemId)) {
           unsentItems.push(item)
         }
         continue

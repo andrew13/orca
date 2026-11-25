@@ -12,6 +12,7 @@ import {
 import {
   AGENT_SESSION_ITEM_DETAIL_RUNTIME_CAPABILITY,
   AGENT_SESSION_SEND_RECORDED_RUNTIME_CAPABILITY,
+  AGENT_SESSION_SEND_RECORDED_ABSENCE_RUNTIME_CAPABILITY,
   AGENT_SESSION_QUESTION_ANSWERS_RUNTIME_CAPABILITY,
   AGENT_SESSION_QUEUED_COMMANDS_RUNTIME_CAPABILITY,
   AGENT_SESSION_QUEUED_MESSAGES_RUNTIME_CAPABILITY,
@@ -75,7 +76,7 @@ export type StructuredAgentSessionHostSupport = {
   permissionOwn?: boolean
   itemDetail: boolean
   /** The host says whether it recorded a send; older hosts answer only through loaded pages. */
-  sendRecorded?: boolean
+  sendRecorded?: boolean | 'confirmed-absence'
   phoneAttachments: boolean
   /** Older hosts lack Continue on an Orca-stopped turn or refuse it from a phone; the phone sends an ordinary message there. */
   continueInterrupted?: boolean
@@ -130,7 +131,9 @@ export function structuredAgentSessionHostSupport(
     permissionOwn: capabilities.includes(AGENT_SESSION_PERMISSION_OWN_RUNTIME_CAPABILITY),
     permissionModes: capabilities.includes(AGENT_SESSION_PERMISSION_MODES_RUNTIME_CAPABILITY),
     itemDetail: capabilities.includes(AGENT_SESSION_ITEM_DETAIL_RUNTIME_CAPABILITY),
-    sendRecorded: capabilities.includes(AGENT_SESSION_SEND_RECORDED_RUNTIME_CAPABILITY),
+    sendRecorded: capabilities.includes(AGENT_SESSION_SEND_RECORDED_ABSENCE_RUNTIME_CAPABILITY)
+      ? 'confirmed-absence'
+      : capabilities.includes(AGENT_SESSION_SEND_RECORDED_RUNTIME_CAPABILITY),
     phoneAttachments: capabilities.includes(AGENT_SESSION_PHONE_ATTACHMENTS_RUNTIME_CAPABILITY),
     continueInterrupted: capabilities.includes(
       AGENT_SESSION_PHONE_CONTINUE_INTERRUPTED_RUNTIME_CAPABILITY

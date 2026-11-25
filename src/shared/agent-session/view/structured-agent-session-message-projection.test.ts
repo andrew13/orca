@@ -160,3 +160,24 @@ it('keeps an uncertain retry visible without calling that attempt unsent', () =>
     })
   ])
 })
+
+it('removes the Send action for an off-page rejected retry that a later copy replaces', () => {
+  const retry = rejected({
+    clientMessageId: 'retry-b',
+    retryOfClientMessageId: KEPT_ID,
+    resolvedAt: 4
+  })
+  const copy = rejected({
+    clientMessageId: 'later-copy',
+    dispatchState: 'accepted',
+    rejection: undefined,
+    submittedAt: 5
+  })
+  expect(
+    projectStructuredAgentSessionMessages(
+      [userItem('retry-b', 'same message', 3), userItem('later-copy', 'same message', 5)],
+      [],
+      [retry, copy]
+    ).map(({ id }) => id)
+  ).toEqual([agentJournalSubmissionKey('later-copy')])
+})

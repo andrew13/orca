@@ -82,8 +82,6 @@ it('a new explicit B has its own task identity; a late A cannot open its gate', 
   await eventually(() => expect(providerOpen.mock.calls.length).toBe(1))
   await vi.advanceTimersByTimeAsync(10_000)
   await eventually(async () => expect((await submission(a))?.dispatchState).toBe('rejected'))
-  await proveOpen()
-  await eventually(() => expect(acquire.mock.calls.length).toBe(1))
   const original = hostTestSendParams('retained task')
   const b = original.envelope.clientOperationId
   const params = structuredAgentSessionMessageSendMutation({
@@ -96,6 +94,11 @@ it('a new explicit B has its own task identity; a late A cannot open its gate', 
   const result = await host.send(CALLER, { ...params, userSend: true })
   expect(result).toMatchObject({ ok: true })
   await eventually(() => expect(providerOpen.mock.calls.length).toBe(2))
+  await proveGeneration(providerOpen.mock.calls[0][0].acquisitionGeneration!)
+  await providerOpen.mock.results[0].value
+  await host.flushStreamedEvents(SESSION)
+  expect(await submission(b)).toMatchObject({ dispatchState: 'pending' })
+  expect(dispatch).not.toHaveBeenCalled()
   await proveOpen()
   await eventually(async () => expect((await submission(b))?.dispatchState).toBe('accepted'))
   expect(await submission(a)).toMatchObject({ dispatchState: 'rejected' })
@@ -111,7 +114,12 @@ it('publishes one canonical retry through the writer and bounded history', async
   const text = 'one retained task'
   const a = await ownerTask(text)
   await eventually(() => expect(providerOpen.mock.calls.length).toBe(1))
+  const flight = host.collaboratorsForTests().runtimeState.startFlights.get(SESSION)!
   await failOpen(codexInstructionFailure('commit'))
+  expect(await flight.outcome).toMatchObject({
+    ok: false,
+    failure: { instructionRecovery: 'commit' }
+  })
   await eventually(async () => expect((await submission(a))?.dispatchState).toBe('rejected'))
   const retry = (target: string) => {
     const message = hostTestSendParams(text)
@@ -159,11 +167,18 @@ it('publishes one canonical retry through the writer and bounded history', async
     clientMessageId: cId,
     dispatchState: 'accepted'
   })
-  expect(
-    projectStructuredAgentSessionMessages(older.page.items, [], older.page.submissions).some(
+  const showsB = (sends: typeof older.page.submissions) =>
+    projectStructuredAgentSessionMessages(older.page.items, [], sends).some(
       ({ id }) => id === bRow.itemId
     )
-  ).toBe(false)
+  // Isolate retry lineage from the host's separate returned-card suppression.
+  const withoutCard = older.page.submissions.map((entry) => ({
+    ...entry,
+    keptAsQueuedMessageId: undefined
+  }))
+  expect(showsB(withoutCard.map((entry) => ({ ...entry, retryLineage: undefined })))).toBe(true)
+  expect(showsB(withoutCard)).toBe(false)
+  expect(showsB(older.page.submissions)).toBe(false)
   expect(dispatch.mock.calls.map(([call]) => call.clientMessageId)).toEqual([cId])
 })
 
@@ -215,7 +230,7 @@ it('does not preempt an accepted active turn to replace a warm binding', async (
   expect(closeSession.mock.calls).toEqual([])
 })
 
-it('keeps a failed task-gate commit uncertain and refuses B without replaying A', async () => {
+it('holds both admitted sends when rejection writes fail and recovers them without replay', async () => {
   await resumeBot()
   const a = await accept('uncertain task A')
   await eventually(() => expect(providerOpen.mock.calls.length).toBe(1))
@@ -260,9 +275,21 @@ it('keeps a failed task-gate commit uncertain and refuses B without replaying A'
     expect(failed).toHaveBeenCalledTimes(1)
     expect(await submission(a)).toMatchObject({ dispatchState: 'pending' })
     expect(providerOpen.mock.calls.length).toBe(1)
+    const b = hostTestSendParams('explicit B')
+    expect(await host.send(CALLER, { ...b, userSend: true })).toMatchObject({
+      ok: true,
+      replayed: true,
+      value: {
+        submission: { clientMessageId: b.envelope.clientOperationId, dispatchState: 'pending' }
+      }
+    })
+    expect(await submission(b.envelope.clientOperationId)).toMatchObject({
+      dispatchState: 'pending'
+    })
+    expect(dispatch).not.toHaveBeenCalled()
     failing.mockRestore()
-    const b = await host.send(CALLER, { ...hostTestSendParams('explicit B'), userSend: true })
-    expect(b).toMatchObject({
+    const c = await host.send(CALLER, { ...hostTestSendParams('explicit C'), userSend: true })
+    expect(c).toMatchObject({
       ok: true,
       value: {
         submission: { dispatchState: 'rejected', rejection: { instructionRecovery: 'pending' } }
@@ -271,6 +298,10 @@ it('keeps a failed task-gate commit uncertain and refuses B without replaying A'
     expect(await submission(a)).toMatchObject({
       dispatchState: 'rejected',
       rejection: { instructionRecovery: 'timeout', neverReachedAgent: true }
+    })
+    expect(await submission(b.envelope.clientOperationId)).toMatchObject({
+      dispatchState: 'rejected',
+      rejection: { instructionRecovery: 'pending', neverReachedAgent: true }
     })
     await proveOpen()
     await host.flushStreamedEvents(SESSION)
@@ -294,23 +325,26 @@ it('bypasses A after a pre-child timeout and failed typed settlement', async () 
     await release.promise
     throw new Error('preflight ended without a child')
   })
-  const a = await ownerTask('A stopped before acquiring a child')
-  await entered.promise
   const { runtimeState, sessions } = host.collaboratorsForTests()
-  const flight = runtimeState.startFlights.get(SESSION)!
-  const session = sessions.get(SESSION)!
-  expect(session.child).toBeFalsy()
-  expect(providerOpen).not.toHaveBeenCalled()
-  const write = session.journal.write.bind(session.journal)
-  const failed = vi.fn()
-  const fault = vi.spyOn(session.journal, 'write').mockImplementation((operation, prepare) => {
-    if (operation.kind === 'start-failure-settle') {
-      failed(operation.input)
-      return Promise.reject(new Error('injected task-gate write failure'))
-    }
-    return write(operation, prepare)
-  })
+  let a: string
+  let restoreWrite: (() => void) | undefined
   try {
+    a = await ownerTask('A stopped before acquiring a child')
+    await entered.promise
+    const flight = runtimeState.startFlights.get(SESSION)!
+    const session = sessions.get(SESSION)!
+    expect(session.child).toBeFalsy()
+    expect(providerOpen).not.toHaveBeenCalled()
+    const write = session.journal.write.bind(session.journal)
+    const failed = vi.fn()
+    const fault = vi.spyOn(session.journal, 'write').mockImplementation((operation, prepare) => {
+      if (operation.kind === 'start-failure-settle') {
+        failed(operation.input)
+        return Promise.reject(new Error('injected task-gate write failure'))
+      }
+      return write(operation, prepare)
+    })
+    restoreWrite = () => fault.mockRestore()
     await vi.advanceTimersByTimeAsync(10_000)
     expect(await flight.outcome).toMatchObject({
       ok: false,
@@ -320,10 +354,11 @@ it('bypasses A after a pre-child timeout and failed typed settlement', async () 
     expect(await session.journal.reads.submission(a)).toMatchObject({ dispatchState: 'pending' })
     expect(dispatch).not.toHaveBeenCalled()
   } finally {
-    fault.mockRestore()
+    restoreWrite?.()
     release.resolve()
   }
   await runtimeState.startFlights.attemptsEnded(SESSION)
+  const session = sessions.get(SESSION)!
   const b = await ownerTask('B after the writer is available')
   await proveOpen()
   let deliveredB = b
@@ -438,17 +473,21 @@ it.each([false, true, 'recorded'] as const)(
     await eventually(async () => expect((await submission(a))?.dispatchState).toBe('rejected'))
     await eventually(() => expect(closeSession.mock.calls.length).toBeGreaterThan(0))
     const probe = vi.fn(async () =>
-      dead
+      dead === true
         ? { outcome: 'pid-absent' as const }
         : { outcome: 'indeterminate' as const, reason: 'writer cannot be verified' }
     )
     host.deps.probeOwner = probe
     if (dead === 'recorded') {
-      await store.evictProvenDeadOwner({
-        sessionId: SESSION,
-        expectedFence: store.getRecord(SESSION)!.lease.runtimeFence,
-        probe: { outcome: 'pid-absent' },
-        now: 1_800_000_000_001
+      await expect(
+        store.evictProvenDeadOwner({
+          sessionId: SESSION,
+          expectedFence: store.getRecord(SESSION)!.lease.runtimeFence,
+          probe: { outcome: 'pid-absent' },
+          now: 1_800_000_000_001
+        })
+      ).resolves.toMatchObject({
+        lease: { runtimeFence: 4, deathEvidence: { kind: 'pid-absent' } }
       })
     }
     const original = hostTestSendParams('retained task after append uncertainty')

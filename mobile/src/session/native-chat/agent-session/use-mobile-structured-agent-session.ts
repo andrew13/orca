@@ -35,7 +35,6 @@ import { useMobileStructuredSendWithOutcome } from '../composer/delivery/use-mob
 import { useMobileStructuredQueuedMessageControls } from '../input/queued-messages/use-mobile-structured-queued-message-controls'
 import { useMobileStructuredBackgroundTasks } from '../input/tasks/use-mobile-structured-background-tasks'
 import { useMobileStructuredSends } from '../composer/delivery/use-mobile-structured-sends'
-import { useMobileStructuredSendRecorded } from '../composer/delivery/mobile-structured-send-recorded-read'
 import { useMobileNativeChatQueueFollowUps as useQueueFollowUps } from '../preferences/use-mobile-native-chat-queue-follow-ups'
 import { useMobileStructuredStopOffer } from '../composer/delivery/use-mobile-structured-stop-offer'
 import { useMobileStructuredTurnIndicator } from '../transcript/ingestion/use-mobile-structured-turn-indicator'
@@ -128,7 +127,8 @@ export function useMobileStructuredAgentSession(
     submissions: state.submissions,
     queuedMessages,
     onSendError,
-    confirmRecorded: useMobileStructuredSendRecorded(client, sessionId, hostSupport)
+    hostSupport,
+    draftScope: args.composerScopeKey
   })
   const transcript = useMobileStructuredTranscript(agent, state, sends.optimistic, sessionKey)
   const { clearing, transcriptItems, messages, receipts } = transcript

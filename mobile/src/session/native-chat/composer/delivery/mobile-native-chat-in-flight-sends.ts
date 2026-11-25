@@ -122,6 +122,22 @@ export function settleMobileNativeChatInFlightSend(
     }))
   }
   saveMobileNativeChatDraft(entry.scope, 'immediate')
+  if (entry.send.deliveryUnconfirmed) {
+    notifyClaimable()
+  }
+}
+
+export function markMobileNativeChatInFlightUnconfirmed(ids: readonly string[]): boolean {
+  let marked = false
+  for (const id of ids) {
+    const entry = inFlightSends.get(id)
+    if (entry?.send.kind === 'structured' && !entry.send.deliveryUnconfirmed) {
+      entry.send = { ...entry.send, deliveryUnconfirmed: true }
+      saveMobileNativeChatDraft(entry.scope, 'immediate')
+      marked = true
+    }
+  }
+  return marked
 }
 
 /** Saved sends nobody is waiting on yet; the caller now holds them until it settles or releases them. */
@@ -191,11 +207,17 @@ export function readMobileNativeChatInFlightSend(id: string): {
 }
 
 export function readMobileNativeChatInFlightStructuredSession(
-  sessionId: string
+  sessionId: string,
+  draftScope?: string
 ): MobileNativeChatInFlightSend[] {
   const sends: MobileNativeChatInFlightSend[] = []
-  for (const { send } of inFlightSends.values()) {
-    if (send.kind === 'structured' && send.sessionId === sessionId && send.clientMessageId) {
+  for (const { scope, send } of inFlightSends.values()) {
+    if (
+      send.kind === 'structured' &&
+      send.sessionId === sessionId &&
+      send.clientMessageId &&
+      (draftScope === undefined || scope === draftScope)
+    ) {
       sends.push(send)
     }
   }

@@ -19,7 +19,17 @@ import {
   useMobileStructuredSends,
   type MobileStructuredSends
 } from '../delivery/use-mobile-structured-sends'
-import type { MobileStructuredSendRecord } from '../delivery/mobile-structured-send-recorded-read'
+import {
+  type MobileStructuredSendConfirmation,
+  type MobileStructuredSendRecord,
+  useMobileStructuredSendRecorded
+} from '../delivery/mobile-structured-send-recorded-read'
+import { structuredAgentSessionHostSupport } from '../../agent-session/mobile-structured-agent-session-host-support'
+import type { UnvalidatedRpcRequestPort } from '../../../../transport/rpc/unvalidated-rpc-request-port'
+import {
+  UNCONFIRMED_SEND_MESSAGE,
+  UNCONFIRMED_SEND_RESTORED_MESSAGE
+} from '../delivery/use-mobile-native-chat-unconfirmed-sends'
 import type { AgentJournalCursor } from '../../../../../../src/shared/agent-session/journal/agent-session-journal-identity'
 import { loadMobileNativeChatDrafts } from './mobile-native-chat-draft-persistence'
 import {
@@ -74,13 +84,15 @@ describe('mobile native-chat draft store', () => {
     cursor,
     connected = true,
     confirmRecorded,
+    lookup,
     queuedMessages = null
   }: {
     tabId: string
     submissions?: readonly AgentJournalSubmission[]
     cursor?: AgentJournalCursor
     connected?: boolean
-    confirmRecorded?: (id: string) => Promise<MobileStructuredSendRecord> | null
+    confirmRecorded?: MobileStructuredSendConfirmation
+    lookup?: { client: UnvalidatedRpcRequestPort; capabilities: readonly string[] }
     queuedMessages?: readonly AgentSessionQueuedMessage[] | null
   }): null {
     const drafts = useMobileNativeChatDrafts({
@@ -92,6 +104,11 @@ describe('mobile native-chat draft store', () => {
       transcriptSettled: true
     })
     state = { ...drafts, composerText: useMobileNativeChatDraft(drafts.draftKey) }
+    const confirmFromHost = useMobileStructuredSendRecorded(
+      lookup?.client ?? null,
+      `session-${tabId}`,
+      lookup ? structuredAgentSessionHostSupport(lookup.capabilities) : null
+    )
     structured = useMobileStructuredSends({
       sessionKey: `session-${tabId}`,
       sessionId: `session-${tabId}`,
@@ -100,7 +117,7 @@ describe('mobile native-chat draft store', () => {
       queuedMessages,
       onSendError: sendError,
       connected,
-      confirmRecorded
+      confirmRecorded: confirmRecorded ?? confirmFromHost
     })
     return null
   }
@@ -185,8 +202,8 @@ describe('mobile native-chat draft store', () => {
       clientMessageId: 'recovery-task',
       inFlightIds: () => [id],
       handBack: () => returnMobileNativeChatInFlightSend(id),
-      asking: new Set(),
-      forget: () => {},
+      checked: new Map(),
+      forgetLocalEcho: () => {},
       readDelivery: () => ({ submissions, queuedMessageIds: [] }),
       sessionId: 'session-a',
       onSendError: sendError
@@ -208,6 +225,138 @@ describe('mobile native-chat draft store', () => {
     expect(readMobileNativeChatInFlightSend(id)?.send.text).toBe('retained task')
   })
 
+  it.each([
+    'unavailable',
+    'legacy',
+    'unadvertised',
+    'transport error',
+    'unreadable',
+    'absent'
+  ] as const)(
+    'makes one custody decision for a send outside the loaded page: %s',
+    async (verdict) => {
+      vi.useFakeTimers({ toFake: ['Date', 'setTimeout', 'clearTimeout'] })
+      try {
+        await mount('a')
+        act(() => currentState().setComposerText('task outside the loaded page'))
+        const origin = sendOrigin('task outside the loaded page')
+        const id = beginMobileNativeChatInFlightSend(
+          origin,
+          'structured',
+          'task outside the loaded page',
+          { clientMessageId: 'outside-page' }
+        )!
+        act(() => currentState().clearDraftForSend(origin, 'task outside the loaded page'))
+        const sendRequest = vi.fn<UnvalidatedRpcRequestPort['sendRequest']>(async () => {
+          if (verdict === 'transport error') {
+            throw new Error('connection lost')
+          }
+          return {
+            id: 'send-lookup',
+            ok: true,
+            result: {
+              recorded: false,
+              ...(verdict === 'legacy' ? {} : { confirmedAbsent: true }),
+              ...(verdict === 'unreadable'
+                ? { submission: { clientMessageId: 'outside-page', dispatchState: 'invalid' } }
+                : {})
+            }
+          }
+        })
+        const capabilities = verdict === 'unavailable' ? [] : ['agent-session.send-recorded.v1']
+        if (verdict === 'absent' || verdict === 'transport error' || verdict === 'unreadable') {
+          capabilities.push('agent-session.send-recorded-absence.v1')
+        }
+        act(() => {
+          renderer!.update(
+            createElement(Harness, {
+              tabId: 'a',
+              lookup: { client: { sendRequest }, capabilities }
+            })
+          )
+          releaseMobileNativeChatInFlightSends([id])
+        })
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(20_000)
+        })
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(60_000)
+        })
+        expect(sendRequest).toHaveBeenCalledTimes(verdict === 'unavailable' ? 0 : 1)
+        if (verdict === 'absent') {
+          expect(currentState().composerText).toBe('task outside the loaded page')
+          expect(readMobileNativeChatInFlightSend(id)).toBeNull()
+          expect(sendError.mock.calls).toEqual([[UNCONFIRMED_SEND_RESTORED_MESSAGE]])
+        } else {
+          expect(currentState().composerText).toBe('')
+          expect(readMobileNativeChatInFlightSend(id)?.send).toMatchObject({
+            text: 'task outside the loaded page',
+            deliveryUnconfirmed: true
+          })
+          expect(sendError.mock.calls).toEqual([[UNCONFIRMED_SEND_MESSAGE]])
+        }
+        if (verdict === 'unavailable') {
+          act(() =>
+            renderer!.update(
+              createElement(Harness, {
+                tabId: 'a',
+                lookup: {
+                  client: { sendRequest },
+                  capabilities: ['agent-session.send-recorded-absence.v1']
+                }
+              })
+            )
+          )
+          await act(async () => {
+            await vi.advanceTimersByTimeAsync(60_000)
+          })
+          expect(sendRequest).toHaveBeenCalledTimes(1)
+          expect(currentState().composerText).toBe('task outside the loaded page')
+          expect(readMobileNativeChatInFlightSend(id)).toBeNull()
+        }
+        if (verdict === 'legacy') {
+          const capable = [...capabilities, 'agent-session.send-recorded-absence.v1']
+          act(() => renderer!.update(createElement(Harness, { tabId: 'b' })))
+          act(() =>
+            renderer!.update(
+              createElement(Harness, {
+                tabId: 'a',
+                lookup: { client: { sendRequest }, capabilities }
+              })
+            )
+          )
+          await act(async () => {
+            await vi.advanceTimersByTimeAsync(20_000)
+          })
+          expect(sendRequest).toHaveBeenCalledTimes(2)
+          expect(sendError.mock.calls).toEqual([[UNCONFIRMED_SEND_MESSAGE]])
+          sendRequest.mockResolvedValueOnce({
+            id: 'send-recheck',
+            ok: true,
+            result: { recorded: false, confirmedAbsent: true }
+          })
+          act(() => renderer!.update(createElement(Harness, { tabId: 'b' })))
+          act(() =>
+            renderer!.update(
+              createElement(Harness, {
+                tabId: 'a',
+                lookup: { client: { sendRequest }, capabilities: capable }
+              })
+            )
+          )
+          await act(async () => {
+            await vi.advanceTimersByTimeAsync(20_000)
+          })
+          expect(sendRequest).toHaveBeenCalledTimes(3)
+          expect(currentState().composerText).toBe('task outside the loaded page')
+          expect(readMobileNativeChatInFlightSend(id)).toBeNull()
+        }
+      } finally {
+        vi.useRealTimers()
+      }
+    }
+  )
+
   it.each([false, true])(
     'keeps a connected covering-page omission through reopen and late rejection, newer input: %s',
     async (newer) => {
@@ -224,6 +373,7 @@ describe('mobile native-chat draft store', () => {
       act(() =>
         updateMobileNativeChatDraftInputs(origin.draftDestination, (inputs) => ({
           ...inputs,
+          files: [file],
           skills: [{ name: 'review', path: '/scratch/SKILL.md' }]
         }))
       )
@@ -281,6 +431,7 @@ describe('mobile native-chat draft store', () => {
       act(() => renderer!.update(createElement(Harness, { tabId: 'a', submissions: [rejected] })))
       expect(currentState().composerText).toBe(newer ? 'new draft' : '')
       expect(readMobileNativeChatInFlightSend(id)?.send.files).toHaveLength(1)
+      expect(readMobileNativeChatDraftInputs(origin.draftDestination.scope).files).toEqual([file])
       const returned: AgentSessionQueuedMessage = {
         messageId: 'paged-task',
         position: 0,
