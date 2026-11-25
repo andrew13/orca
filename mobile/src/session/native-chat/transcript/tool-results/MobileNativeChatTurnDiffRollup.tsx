@@ -12,7 +12,7 @@ import { useMobileTranslation } from '../../../../i18n/use-mobile-translation'
 import { useMobileColorScheme } from '../../../../theme/use-mobile-color-scheme'
 import { colors, pressedStyle, spacing } from '../../../../theme/mobile-theme'
 import { themedStyleSheet } from '../../../../theme/themed-styles'
-import { toolType } from './mobile-native-chat-tool-styles'
+import { TOOL_ROW_HEIGHT, toolType } from './mobile-native-chat-tool-styles'
 import { nativeChatEditFileBaseName } from '../../../../../../src/shared/native-chat/tools/native-chat-edit-model'
 
 function FileRow({
@@ -144,13 +144,18 @@ const styles = themedStyleSheet(() => ({
     marginBottom: spacing.md,
     marginHorizontal: spacing.lg
   },
-  summary: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm, minHeight: 44 },
+  summary: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+    minHeight: TOOL_ROW_HEIGHT
+  },
   caret: { marginLeft: 'auto' },
   file: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: spacing.sm,
-    minHeight: 44
+    minHeight: TOOL_ROW_HEIGHT
   },
   path: { maxWidth: '65%', flexShrink: 1, color: colors.textPrimary },
   directory: { flex: 1, color: colors.textMuted },
